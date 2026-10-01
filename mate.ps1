@@ -417,7 +417,7 @@ if (-not $requestId) { $requestId = ('offline-{0}' -f (Get-Date -Format 'yyyyMMd
 $targetAlias = [string]$cfg.TargetAlias
 if (-not $targetAlias) { $targetAlias = 'new-mate-pc' }
 
-$reportRoot = if ($AuditOnly) { Join-Path $env:TEMP 'JongMAC26-SSH-Audit' } else { Join-Path $env:ProgramData 'JongMAC26-SSH' }
+$reportRoot = if ($AuditOnly) { Join-Path $env:TEMP 'Cookapps-SSH-Audit' } else { Join-Path $env:ProgramData 'Cookapps-SSH' }
 $backupRoot = Join-Path $reportRoot 'backups'
 $reportsRoot = Join-Path $reportRoot 'reports'
 New-Item -ItemType Directory -Path $backupRoot, $reportsRoot -Force | Out-Null
@@ -564,7 +564,7 @@ try {
         $newLines += [string]$cfg.PublicKey
         Write-Utf8NoBom -Path $script:KeyPath -Text (($newLines -join "`r`n").TrimEnd() + "`r`n")
         $script:KeyChanged = $true
-        Add-Activity '기존 키를 보존하고 JongMAC26 공개키를 추가했습니다.'
+        Add-Activity '기존 키를 보존하고 Cookapps 원격 접속 공개키를 추가했습니다.'
     }
 
     if (-not $AuditOnly -and $script:KeyChanged) {
@@ -576,7 +576,7 @@ try {
     }
 
     if (-not $AuditOnly -and -not (Test-ExistingFirewallAllow)) {
-        New-NetFirewallRule -Name 'JongMAC26-Mate-SSH-In-TCP' -DisplayName 'JongMAC26 mate PC SSH (TCP 22)' -Enabled True -Direction Inbound -Protocol TCP -LocalPort 22 -Action Allow -Profile Any | Out-Null
+        New-NetFirewallRule -Name 'Cookapps-Mate-SSH-In-TCP' -DisplayName 'Cookapps mate PC SSH (TCP 22)' -Enabled True -Direction Inbound -Protocol TCP -LocalPort 22 -Action Allow -Profile Any | Out-Null
         $script:FirewallCreated = $true
         Add-Activity '기존 규칙을 변경하지 않고 TCP 22 허용 규칙을 추가했습니다.'
     } else {
@@ -623,7 +623,7 @@ try {
     }
     if ($script:FirewallCreated -and -not $AuditOnly) {
         try {
-            Get-NetFirewallRule -Name 'JongMAC26-Mate-SSH-In-TCP' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+            Get-NetFirewallRule -Name 'Cookapps-Mate-SSH-In-TCP' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
             Add-Activity '이번 실행에서 만든 방화벽 규칙을 되돌렸습니다.'
         } catch {
             Add-Warning '이번 실행에서 만든 방화벽 규칙을 자동 제거하지 못했습니다.'
