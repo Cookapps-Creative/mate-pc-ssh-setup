@@ -332,12 +332,11 @@ function Show-ResultScreen {
     Write-Host ('서버 키 지문   : {0}' -f $Data.HostKeyFingerprint)
     Write-Host ''
     if ($Data.ReportDelivered) {
-        Write-Host '설치 결과를 담당자용 폴더에 저장했습니다. 담당자가 확인합니다.' -ForegroundColor Green
+        Write-Host '설치가 끝났습니다. 담당자에게 완료되었다고 알려 주세요.' -ForegroundColor Green
     } elseif ($Data.AuditOnly) {
         Write-Host '감사 모드로 실행되어 결과를 저장하지 않았습니다.' -ForegroundColor Yellow
     } else {
-        Write-Host '결과 폴더에 저장하지 못해 이 PC에 결과를 저장했습니다.' -ForegroundColor Yellow
-        Write-Host '이 화면을 담당자에게 알려 주세요.' -ForegroundColor White
+        Write-Host '설치가 끝났습니다. 위 내용을 담당자에게 전달해 주세요.' -ForegroundColor Green
     }
     if (-not $Succeeded -and $Data.Error) {
         Write-Host ''
