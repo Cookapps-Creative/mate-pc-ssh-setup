@@ -88,19 +88,20 @@ function Show-BrandHeader {
         '⠈⠻⢶⣶⣾⣿⣷⣶⡶⠟⠁'
     )
     $title = @(
-        '██████╗ ██████╗  ██████╗ ██╗  ██╗ █████╗ ██████╗ ██████╗ ███████╗',
+        ' ██████╗ ██████╗  ██████╗ ██╗  ██╗ █████╗ ██████╗ ██████╗ ███████╗',
         '██╔════╝██╔═══██╗██╔═══██╗██║ ██╔╝██╔══██╗██╔══██╗██╔══██╗██╔════╝',
         '██║     ██║   ██║██║   ██║█████╔╝ ███████║██████╔╝██████╔╝███████╗',
         '██║     ██║   ██║██║   ██║██╔═██╗ ██╔══██║██╔═══╝ ██╔═══╝ ╚════██║',
         '╚██████╗╚██████╔╝╚██████╔╝██║  ██╗██║  ██║██║     ██║     ███████║',
         ' ╚═════╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝     ╚══════╝'
     )
-    Write-Host $ornamentTop -ForegroundColor DarkYellow
+    $orange = [char]27 + '[38;5;208m'
+    $reset = [char]27 + '[0m'
+    Write-Host ($orange + $ornamentTop + $reset)
     for ($index = 0; $index -lt $logo.Count; $index++) {
-        Write-Host ($logo[$index].PadRight(19)) -NoNewline -ForegroundColor DarkYellow
-        Write-Host $title[$index] -ForegroundColor DarkYellow
+        Write-Host ($orange + $logo[$index].PadRight(19) + $title[$index] + $reset)
     }
-    Write-Host $ornamentBottom -ForegroundColor DarkYellow
+    Write-Host ($orange + $ornamentBottom + $reset)
 }
 
 function Wait-ForUserClose {
