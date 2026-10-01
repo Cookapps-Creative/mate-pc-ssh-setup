@@ -6,7 +6,6 @@ Publishing 팀 동료 Windows PC(mate PC)를 사내 작업용으로 준비하는
 ## 원격 접속 권한
 
 - mate PC로 들어오는 원격 접속은 **사내 게이트웨이 PC(marketing-pc)를 거쳐서만** 이루어집니다. 원격 접속 권한은 원칙적으로 marketing-pc에 있습니다.
-- 담당자의 Mac(JongMAC26)은 mate PC에 직접 접속하지 않고, marketing-pc를 거쳐 간접적으로 작업합니다.
 - mate PC에는 Tailscale 같은 외부 접속 도구를 설치하지 않습니다.
 
 ## `mate.ps1`이 하는 일
