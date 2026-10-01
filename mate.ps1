@@ -20,7 +20,7 @@ $script:EmbeddedConfig = @'
   "PublicKeyFingerprint": "SHA256:bnqTzCgJQpM7UjbJCBTh3xNFmWVVTXobJzw8kGEYiz4",
   "ReportUrl": "",
   "ReportExpiresAtUtc": "",
-  "ReportDirectory": "",
+  "ReportDirectory": "\\\\nas\\Cookapps Project\\ON_AIR_UA\\#기타\\Publishing mate-pc SSH\\reports",
   "GateSalt": "6f82e749bbdbf05b",
   "GateHash": "b7a30c6f4e0655e9e085377145141fb4e32896497161839c71102a1fdc2e020a"
 }
@@ -329,14 +329,15 @@ function Show-ResultScreen {
     Write-Host ('PC             : {0}' -f $Data.ComputerName)
     Write-Host ('Windows 사용자 : {0}' -f $Data.TargetUser)
     Write-Host ('주소           : {0}' -f ($Data.LanAddresses -join ', '))
+    Write-Host ('서버 키 지문   : {0}' -f $Data.HostKeyFingerprint)
     Write-Host ''
     if ($Data.ReportDelivered) {
-        Write-Host '설치 결과를 종민님에게 자동으로 전송했습니다.' -ForegroundColor Green
+        Write-Host '설치 결과를 담당자용 폴더에 저장했습니다. 담당자가 확인합니다.' -ForegroundColor Green
     } elseif ($Data.AuditOnly) {
-        Write-Host '감사 모드로 실행되어 결과 파일을 전송하지 않았습니다.' -ForegroundColor Yellow
+        Write-Host '감사 모드로 실행되어 결과를 저장하지 않았습니다.' -ForegroundColor Yellow
     } else {
-        Write-Host '자동 전송에 실패하여 공용 바탕 화면에 결과 파일을 저장했습니다.' -ForegroundColor Yellow
-        Write-Host '바탕 화면의 COOKAPPS SSH 연결 결과 파일을 종민님에게 보내 주세요.' -ForegroundColor White
+        Write-Host '결과 폴더에 저장하지 못해 이 PC에 결과를 저장했습니다.' -ForegroundColor Yellow
+        Write-Host '이 화면을 담당자에게 알려 주세요.' -ForegroundColor White
     }
     if (-not $Succeeded -and $Data.Error) {
         Write-Host ''
@@ -676,7 +677,7 @@ try {
     Write-Utf8NoBom -Path $script:LocalReportPath -Text $json
 
     try {
-        if ($AuditOnly) { throw 'AUDIT_ONLY_SKIP_DESKTOP' }
+        if ($AuditOnly -or $script:ReportDelivered) { throw 'AUDIT_ONLY_SKIP_DESKTOP' }
         $publicDesktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
         if (-not $publicDesktop) { $publicDesktop = Join-Path $env:PUBLIC 'Desktop' }
         $desktopReport = Join-Path $publicDesktop ('COOKAPPS SSH 연결 결과 - {0}.txt' -f $env:COMPUTERNAME)
