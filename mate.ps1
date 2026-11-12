@@ -305,6 +305,17 @@ function Get-KeyFingerprint {
     return $null
 }
 
+$script:OpenSshCapabilityName = 'OpenSSH.Server~~~~0.0.1.0'
+
+function Get-OpenSshServerState {
+    $output = @(& (Join-Path $env:SystemRoot 'System32\dism.exe') /Online /English /Get-CapabilityInfo "/CapabilityName:$script:OpenSshCapabilityName" 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw ('DISM으로 Windows OpenSSH Server 상태를 확인하지 못했습니다(종료 코드 {0}).' -f $LASTEXITCODE) }
+    foreach ($line in $output) {
+        if ([string]$line -match '^\s*State\s*:\s*(.+?)\s*$') { return $Matches[1] }
+    }
+    throw 'Windows OpenSSH Server 기능을 찾지 못했습니다.'
+}
+
 function Test-ExistingFirewallAllow {
     try {
         $filters = @(Get-NetFirewallRule -Enabled True -Direction Inbound -Action Allow -ErrorAction Stop | Get-NetFirewallPortFilter -ErrorAction Stop)
@@ -335,7 +346,9 @@ function Show-ResultScreen {
     Write-Host ('주소           : {0}' -f ($Data.LanAddresses -join ', '))
     Write-Host ('서버 키 지문   : {0}' -f $Data.HostKeyFingerprint)
     Write-Host ''
-    if ($Data.ReportDelivered) {
+    if (-not $Succeeded -and -not $Data.AuditOnly) {
+        Write-Host '설치를 마치지 못했습니다. 이 화면을 캡처해 담당자에게 보내 주세요.' -ForegroundColor Yellow
+    } elseif ($Data.ReportDelivered) {
         Write-Host '설치가 끝났습니다. 담당자에게 완료되었다고 알려 주세요.' -ForegroundColor Green
     } elseif ($Data.AuditOnly) {
         Write-Host '감사 모드로 실행되어 결과를 저장하지 않았습니다.' -ForegroundColor Yellow
@@ -470,19 +483,20 @@ try {
     if ([string]$target.FullName -match '^AzureAD\\') { throw 'Microsoft Entra ID 계정은 이 자동 등록 절차에서 지원하지 않습니다.' }
     if (-not $target.Profile -or -not (Test-Path -LiteralPath $target.Profile)) { throw '현재 로그인 사용자의 프로필 폴더를 찾지 못했습니다.' }
 
-    $capability = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
-    if (-not $capability) { throw 'Windows OpenSSH Server 기능을 찾지 못했습니다.' }
-    $report.OpenSshCapability = [string]$capability.State
+    # PowerShell 7의 Get/Add-WindowsCapability는 일부 PC에서 '클래스가 등록되지 않았습니다'로 실패하므로 dism.exe를 쓴다.
+    $capabilityState = Get-OpenSshServerState
+    $report.OpenSshCapability = $capabilityState
 
-    if (-not $AuditOnly -and $capability.State -ne 'Installed') {
+    if (-not $AuditOnly -and $capabilityState -ne 'Installed') {
         Add-Activity 'Windows OpenSSH Server를 설치합니다.'
-        Add-WindowsCapability -Online -Name $capability.Name | Out-Null
-        $capability = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
-        if ($capability.State -ne 'Installed') { throw 'Windows OpenSSH Server 설치를 완료하지 못했습니다.' }
-        $report.OpenSshCapability = [string]$capability.State
+        $dismOutput = @(& (Join-Path $env:SystemRoot 'System32\dism.exe') /Online /English /NoRestart /Add-Capability "/CapabilityName:$script:OpenSshCapabilityName" 2>&1)
+        if ($LASTEXITCODE -notin @(0, 3010)) { throw ('Windows OpenSSH Server 설치가 종료 코드 {0}으로 실패했습니다. {1}' -f $LASTEXITCODE, (($dismOutput | Where-Object { $_ -match 'Error' }) -join ' ')) }
+        $capabilityState = Get-OpenSshServerState
+        if ($capabilityState -ne 'Installed') { throw 'Windows OpenSSH Server 설치를 완료하지 못했습니다.' }
+        $report.OpenSshCapability = $capabilityState
     }
 
-    if ($capability.State -ne 'Installed') {
+    if ($capabilityState -ne 'Installed') {
         if ($AuditOnly) { throw '감사 모드: OpenSSH Server가 설치되어 있지 않습니다.' }
         throw 'OpenSSH Server가 설치되어 있지 않습니다.'
     }
