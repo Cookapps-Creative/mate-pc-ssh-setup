@@ -35,6 +35,18 @@ function Test-Administrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 }
 
+function Test-AdministratorsMember {
+    param([string[]]$Groups)
+    # UAC 제한 토큰에서는 Administrators가 '거부 전용' 그룹이라 WindowsIdentity.Groups에 나오지 않는다.
+    # sshd는 실제 그룹 소속(Match Group administrators)으로 판단하므로 whoami /groups(거부 전용 포함)로도 확인한다.
+    if ($Groups -contains 'S-1-5-32-544') { return $true }
+    try {
+        $lines = @(& (Join-Path $env:SystemRoot 'System32\whoami.exe') /groups /fo csv /nh 2>$null)
+        if (@($lines | Where-Object { [string]$_ -match '"S-1-5-32-544"' }).Count -gt 0) { return $true }
+    } catch {}
+    return $false
+}
+
 function New-UserContext {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $sid = $identity.User.Value
@@ -44,7 +56,7 @@ function New-UserContext {
         UserName = ($identity.Name -split '\\')[-1]
         SID = $sid
         Profile = [Environment]::GetFolderPath('UserProfile')
-        IsAdministratorMember = ($groups -contains 'S-1-5-32-544')
+        IsAdministratorMember = (Test-AdministratorsMember -Groups $groups)
     }
 }
 
