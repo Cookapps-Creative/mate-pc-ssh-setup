@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$ConfigPath = (Join-Path $PSScriptRoot 'bootstrap.json'),
+    [string]$ConfigPath,
     [switch]$Elevated,
     [switch]$PwshRelaunched,
     [string]$ContextPath,
@@ -25,6 +25,9 @@ $script:EmbeddedConfig = @'
   "GateHash": "b7a30c6f4e0655e9e085377145141fb4e32896497161839c71102a1fdc2e020a"
 }
 '@
+# Windows PowerShell 5.1 leaves $PSScriptRoot empty in param defaults when run with -File; resolve paths here instead.
+if (-not $script:BootstrapScriptPath) { $script:BootstrapScriptPath = $MyInvocation.MyCommand.Path }
+if (-not $ConfigPath) { $ConfigPath = Join-Path (Split-Path -Parent $script:BootstrapScriptPath) 'bootstrap.json' }
 
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
