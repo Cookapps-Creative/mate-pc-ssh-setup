@@ -200,6 +200,7 @@ $script:KeyBackup = $null
 $script:AclBackup = $null
 $script:CreatedSshDirectory = $false
 $script:FirewallCreated = $false
+$script:KeyCommitted = $false
 $script:ReportDelivered = $false
 $script:LocalReportPath = $null
 $script:ExitCode = 1
@@ -273,23 +274,43 @@ function Get-SidValue {
     try { return $Identity.Translate([Security.Principal.SecurityIdentifier]).Value } catch { return $Identity.Value }
 }
 
-function Assert-KeyAclIsManaged {
+function Test-KeyAclIsManaged {
     param([string]$Path, [string[]]$AllowedSids)
-    if (-not (Test-Path -LiteralPath $Path)) { return }
+    if (-not (Test-Path -LiteralPath $Path)) { return $true }
     $acl = Get-Acl -LiteralPath $Path
-    if (-not $acl.AreAccessRulesProtected) {
-        throw '기존 공개키 파일이 상속 권한을 사용하므로 자동 변경하지 않았습니다.'
-    }
-    $unexpected = @()
+    if (-not $acl.AreAccessRulesProtected) { return $false }
     foreach ($entry in $acl.Access) {
         $sid = Get-SidValue -Identity $entry.IdentityReference
-        if ($entry.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $AllowedSids -notcontains $sid) {
-            $unexpected += $sid
-        }
+        if ($entry.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $AllowedSids -notcontains $sid) { return $false }
     }
-    if ($unexpected.Count -gt 0) {
-        throw ('기존 공개키 파일에 예상하지 않은 권한이 있어 자동 변경하지 않았습니다: {0}' -f (($unexpected | Select-Object -Unique) -join ', '))
+    return $true
+}
+
+# sshd(Win32-OpenSSH)는 키 파일의 소유자가 SYSTEM/Administrators/본인이고 다른 계정에 권한이 없어야 읽는다.
+# icacls /grant:r는 다른 계정의 명시적 권한을 남기므로, 권한 목록을 새로 만들어 통째로 바꾼다.
+function Set-KeyFileAcl {
+    param([string]$Path, [string[]]$AllowedSids)
+    $security = New-Object Security.AccessControl.FileSecurity
+    $security.SetAccessRuleProtection($true, $false)
+    $security.SetOwner((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')))
+    foreach ($sidValue in $AllowedSids) {
+        $sid = New-Object Security.Principal.SecurityIdentifier($sidValue)
+        $security.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'Allow')))
     }
+    Set-Acl -LiteralPath $Path -AclObject $security
+    if (-not (Test-KeyAclIsManaged -Path $Path -AllowedSids $AllowedSids)) { throw ('공개키 파일 권한을 설정하지 못했습니다: {0}' -f $Path) }
+}
+
+function Test-FileHasBom {
+    param([string]$Path)
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $head = New-Object byte[] 3
+        $count = $stream.Read($head, 0, 3)
+    } finally { $stream.Dispose() }
+    if ($count -ge 2 -and (($head[0] -eq 0xFF -and $head[1] -eq 0xFE) -or ($head[0] -eq 0xFE -and $head[1] -eq 0xFF))) { return $true }
+    if ($count -ge 3 -and $head[0] -eq 0xEF -and $head[1] -eq 0xBB -and $head[2] -eq 0xBF) { return $true }
+    return $false
 }
 
 function Get-PrimaryNetwork {
@@ -473,6 +494,8 @@ $report = [ordered]@{
     SshdStatus = $null
     SshdStartType = $null
     Firewall = $null
+    NetworkProfiles = @()
+    SshdSettings = @()
     AuthorizedKeysPath = $null
     AccessKeyFingerprint = [string]$cfg.PublicKeyFingerprint
     HostKeyFingerprint = $null
@@ -536,6 +559,10 @@ try {
     $authLine = @($effective | Where-Object { [string]$_ -match '^authorizedkeysfile\s+' } | Select-Object -First 1)
     if ($authLine.Count -eq 0) { throw 'sshd의 AuthorizedKeysFile 적용값을 찾지 못했습니다.' }
     $effectiveKeyValue = (([string]$authLine[0]) -replace '^authorizedkeysfile\s+', '').Trim().Trim('"').Replace('\','/').ToLowerInvariant()
+    $report.SshdSettings = @($effective | Where-Object { [string]$_ -match '^(port|listenaddress|pubkeyauthentication|passwordauthentication|allowusers|allowgroups|denyusers|denygroups|authenticationmethods)\s' } | ForEach-Object { [string]$_ })
+    if (@($effective | Where-Object { [string]$_ -match '^pubkeyauthentication\s+no' }).Count -gt 0) { throw 'sshd 설정에서 공개키 로그인이 꺼져 있어 자동 변경하지 않았습니다.' }
+    if (@($effective | Where-Object { [string]$_ -match '^port\s+22$' }).Count -eq 0) { Add-Warning 'sshd 포트가 22가 아닙니다. 접속 설정의 Port를 맞춰야 합니다.' }
+    if (@($effective | Where-Object { [string]$_ -match '^(allowusers|allowgroups|denyusers|denygroups)\s' }).Count -gt 0) { Add-Warning 'sshd에 사용자·그룹 접속 제한이 있습니다. 로그인이 막힐 수 있습니다.' }
 
     if ([bool]$target.IsAdministratorMember) {
         $expectedValues = @('__programdata__/ssh/administrators_authorized_keys', (Join-Path $env:ProgramData 'ssh\administrators_authorized_keys').Replace('\','/').ToLowerInvariant())
@@ -565,14 +592,24 @@ try {
 
     $allowedSids = @('S-1-5-18', 'S-1-5-32-544')
     if (-not [bool]$target.IsAdministratorMember) { $allowedSids += [string]$target.SID }
-    Assert-KeyAclIsManaged -Path $script:KeyPath -AllowedSids $allowedSids
 
     $script:KeyExisted = Test-Path -LiteralPath $script:KeyPath
     $existingLines = @()
-    if ($script:KeyExisted) { $existingLines = @(Get-Content -LiteralPath $script:KeyPath) }
+    $needsRewrite = $false
+    $aclManaged = $true
+    if ($script:KeyExisted) {
+        $existingLines = @(Get-Content -LiteralPath $script:KeyPath | Where-Object { $null -ne $_ })
+        if (Test-FileHasBom -Path $script:KeyPath) {
+            $needsRewrite = $true
+            Add-Warning '기존 공개키 파일의 인코딩(BOM/UTF-16)을 sshd가 읽는 UTF-8로 바꿨습니다.'
+        }
+        $aclManaged = Test-KeyAclIsManaged -Path $script:KeyPath -AllowedSids $allowedSids
+        if (-not $aclManaged) { Add-Warning '기존 공개키 파일 권한이 sshd 요구와 달라 백업한 뒤 표준 권한으로 바꿨습니다.' }
+    }
     $sameKeyLines = @($existingLines | Where-Object { [string]$_ -match ('(?<!\S)ssh-ed25519\s+{0}(?:\s|$)' -f [regex]::Escape($keyBlob)) })
+    $addKey = ($sameKeyLines.Count -eq 0)
 
-    if ($sameKeyLines.Count -gt 0) {
+    if (-not $addKey) {
         if (@($sameKeyLines | Where-Object { $_ -match '(^|,|\s)(restrict|no-port-forwarding)(,|\s)' }).Count -gt 0) {
             $report.PostConnectReviewRequired = $true
             Add-Warning '기존 공개키에 포트 연결 제한이 있습니다. SSH 연결 후 OAuth/웹 터널 사용 전에 검토해야 합니다.'
@@ -582,38 +619,60 @@ try {
             Add-Warning '기존 공개키에 접속 출발지 제한이 있습니다. marketing-pc 게이트웨이 경로와 대체 경로를 각각 검증해야 합니다.'
         }
         Add-Activity '같은 공개키가 이미 있어 중복 추가하지 않았습니다.'
-    } elseif (-not $AuditOnly) {
+    }
+
+    if (-not $AuditOnly -and ($addKey -or $needsRewrite -or -not $aclManaged)) {
         $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
         if ($script:KeyExisted) {
             $script:KeyBackup = Join-Path $backupRoot ('authorized_keys-{0}-{1}.bak' -f $requestId, $timestamp)
             Copy-Item -LiteralPath $script:KeyPath -Destination $script:KeyBackup -Force
-            $script:AclBackup = Join-Path $backupRoot ('authorized_keys-{0}-{1}.acl.xml' -f $requestId, $timestamp)
-            Get-Acl -LiteralPath $script:KeyPath | Export-Clixml -LiteralPath $script:AclBackup
+            $script:AclBackup = Join-Path $backupRoot ('authorized_keys-{0}-{1}.acl.sddl' -f $requestId, $timestamp)
+            Write-Utf8NoBom -Path $script:AclBackup -Text (Get-Acl -LiteralPath $script:KeyPath).Sddl
         }
-        $newLines = @($existingLines)
-        $newLines += [string]$cfg.PublicKey
-        Write-Utf8NoBom -Path $script:KeyPath -Text (($newLines -join "`r`n").TrimEnd() + "`r`n")
         $script:KeyChanged = $true
-        Add-Activity '기존 키를 보존하고 Cookapps 원격 접속 공개키를 추가했습니다.'
-    }
-
-    if (-not $AuditOnly -and $script:KeyChanged) {
-        if ([bool]$target.IsAdministratorMember) {
-            Invoke-Icacls -Arguments @($script:KeyPath, '/inheritance:r', '/grant:r', '*S-1-5-18:F', '*S-1-5-32-544:F')
-        } else {
-            Invoke-Icacls -Arguments @($script:KeyPath, '/inheritance:r', '/grant:r', ('*{0}:F' -f $target.SID), '*S-1-5-18:F', '*S-1-5-32-544:F')
+        if ($addKey -or $needsRewrite) {
+            $newLines = @($existingLines)
+            if ($addKey) { $newLines += [string]$cfg.PublicKey }
+            Write-Utf8NoBom -Path $script:KeyPath -Text (($newLines -join "`r`n").TrimEnd() + "`r`n")
+            if ($addKey) { Add-Activity '기존 키를 보존하고 Cookapps 원격 접속 공개키를 추가했습니다.' }
         }
+        Set-KeyFileAcl -Path $script:KeyPath -AllowedSids $allowedSids
+        Add-Activity '공개키 파일 권한을 sshd 요구에 맞췄습니다.'
+    }
+    if (-not $AuditOnly) {
+        $verifyLines = @(Get-Content -LiteralPath $script:KeyPath -ErrorAction Stop)
+        if (@($verifyLines | Where-Object { [string]$_ -match ('(?<!\S)ssh-ed25519\s+{0}(?:\s|$)' -f [regex]::Escape($keyBlob)) }).Count -eq 0) { throw '공개키 파일에 Cookapps 공개키가 기록되지 않았습니다.' }
+        if (-not (Test-KeyAclIsManaged -Path $script:KeyPath -AllowedSids $allowedSids)) { throw '공개키 파일 권한이 sshd 요구와 다릅니다.' }
+        # 여기부터는 공개키 등록이 끝난 상태다. 이후 단계가 실패해도 키를 되돌리지 않고 경고로 남긴다.
+        $script:KeyCommitted = $true
     }
 
-    if (-not $AuditOnly -and -not (Test-ExistingFirewallAllow)) {
-        New-NetFirewallRule -Name 'Cookapps-Mate-SSH-In-TCP' -DisplayName 'Cookapps mate PC SSH (TCP 22)' -Enabled True -Direction Inbound -Protocol TCP -LocalPort 22 -Action Allow -Profile Any | Out-Null
-        $script:FirewallCreated = $true
-        Add-Activity '기존 규칙을 변경하지 않고 TCP 22 허용 규칙을 추가했습니다.'
-    } else {
-        Add-Activity '기존 TCP 22 허용 방화벽 규칙을 보존했습니다.'
+    Add-Activity 'Windows 방화벽 규칙을 확인합니다. 잠시 걸릴 수 있습니다.'
+    # OpenSSH 기본 규칙(OpenSSH-Server-In-TCP)은 Private 프로필 전용일 수 있다. 사무실 LAN이 Public이면 막히므로
+    # 다른 규칙 유무와 관계없이 모든 프로필에서 TCP 22를 허용하는 Cookapps 규칙을 둔다.
+    if (-not $AuditOnly) {
+        try {
+            $ownRule = Get-NetFirewallRule -Name 'Cookapps-Mate-SSH-In-TCP' -ErrorAction SilentlyContinue
+            if (-not $ownRule) {
+                New-NetFirewallRule -Name 'Cookapps-Mate-SSH-In-TCP' -DisplayName 'Cookapps mate PC SSH (TCP 22)' -Enabled True -Direction Inbound -Protocol TCP -LocalPort 22 -Action Allow -Profile Any | Out-Null
+                $script:FirewallCreated = $true
+                Add-Activity '모든 네트워크 프로필에서 TCP 22를 허용하는 규칙을 추가했습니다.'
+            } else {
+                Set-NetFirewallRule -Name 'Cookapps-Mate-SSH-In-TCP' -Enabled True -Direction Inbound -Action Allow -Profile Any
+                Get-NetFirewallRule -Name 'Cookapps-Mate-SSH-In-TCP' | Set-NetFirewallPortFilter -Protocol TCP -LocalPort 22
+                Add-Activity '기존 Cookapps TCP 22 허용 규칙을 모든 네트워크 프로필에서 켰습니다.'
+            }
+        } catch {
+            Add-Warning ('TCP 22 방화벽 규칙을 추가하지 못했습니다: {0}' -f $_.Exception.Message)
+        }
     }
     $report.Firewall = $(if (Test-ExistingFirewallAllow) { 'ALLOW_TCP_22_FOUND' } else { 'ALLOW_TCP_22_NOT_FOUND' })
-    if (-not $AuditOnly -and $report.Firewall -ne 'ALLOW_TCP_22_FOUND') { throw 'TCP 22 인바운드 허용 규칙을 확인하지 못했습니다.' }
+    if (-not $AuditOnly -and $report.Firewall -ne 'ALLOW_TCP_22_FOUND') { Add-Warning 'TCP 22 인바운드 허용 규칙을 확인하지 못했습니다.' }
+    try {
+        $blockRules = @(Get-NetFirewallRule -Enabled True -Direction Inbound -Action Block -ErrorAction Stop | Get-NetFirewallPortFilter -ErrorAction Stop | Where-Object { @($_.LocalPort) -contains '22' })
+        if ($blockRules.Count -gt 0) { Add-Warning ('TCP 22를 막는 인바운드 차단 규칙이 {0}개 있습니다. 접속이 막힐 수 있습니다.' -f $blockRules.Count) }
+    } catch {}
+    try { $report.NetworkProfiles = @(Get-NetConnectionProfile -ErrorAction Stop | ForEach-Object { '{0}={1}' -f $_.InterfaceAlias, $_.NetworkCategory }) } catch {}
 
     $report.LanAddresses = @(Get-PrimaryNetwork)
     if ($report.LanAddresses.Count -eq 0) { Add-Warning '기본 게이트웨이가 있는 사무실 LAN 주소를 자동으로 찾지 못했습니다.' }
@@ -623,12 +682,19 @@ try {
     }
 
     $hostPublicKey = Join-Path $env:ProgramData 'ssh\ssh_host_ed25519_key.pub'
-    $report.HostKeyFingerprint = Get-KeyFingerprint -SshKeygen $sshKeygen -Path $hostPublicKey
-    if (-not $report.HostKeyFingerprint) { throw 'ED25519 SSH 서버 키 지문을 확인하지 못했습니다.' }
+    try { $report.HostKeyFingerprint = Get-KeyFingerprint -SshKeygen $sshKeygen -Path $hostPublicKey } catch {}
+    if (-not $report.HostKeyFingerprint) {
+        if ($AuditOnly) { throw 'ED25519 SSH 서버 키 지문을 확인하지 못했습니다.' }
+        Add-Warning 'ED25519 SSH 서버 키 지문을 확인하지 못했습니다.'
+    }
 
     if (-not $AuditOnly) {
         $listener = Get-NetTCPConnection -State Listen -LocalPort 22 -ErrorAction SilentlyContinue
-        if (-not $listener) { throw 'sshd가 TCP 22에서 수신 중이지 않습니다.' }
+        if (-not $listener) {
+            try { Restart-Service -Name sshd -ErrorAction Stop; Start-Sleep -Seconds 3 } catch {}
+            $listener = Get-NetTCPConnection -State Listen -LocalPort 22 -ErrorAction SilentlyContinue
+        }
+        if (-not $listener) { Add-Warning 'sshd가 TCP 22에서 수신 중인지 확인하지 못했습니다.' }
     }
 
     $report.Status = $(if ($AuditOnly) { 'AUDIT_OK' } else { 'READY_FOR_MAC_VERIFICATION' })
@@ -638,11 +704,15 @@ try {
     $report.Status = 'FAILED'
     $report.Error = $_.Exception.Message
     Add-Activity ('실패: {0}' -f $_.Exception.Message)
-    if ($script:KeyChanged -and -not $AuditOnly) {
+    if ($script:KeyChanged -and -not $script:KeyCommitted -and -not $AuditOnly) {
         try {
             if ($script:KeyExisted -and $script:KeyBackup) {
                 Copy-Item -LiteralPath $script:KeyBackup -Destination $script:KeyPath -Force
-                if ($script:AclBackup) { Set-Acl -LiteralPath $script:KeyPath -AclObject (Import-Clixml -LiteralPath $script:AclBackup) }
+                if ($script:AclBackup) {
+                    $restoredAcl = New-Object Security.AccessControl.FileSecurity
+                    $restoredAcl.SetSecurityDescriptorSddlForm(([IO.File]::ReadAllText($script:AclBackup)).Trim())
+                    Set-Acl -LiteralPath $script:KeyPath -AclObject $restoredAcl
+                }
             } elseif (Test-Path -LiteralPath $script:KeyPath) {
                 Remove-Item -LiteralPath $script:KeyPath -Force
             }
@@ -651,7 +721,7 @@ try {
             Add-Warning '공개키 파일 자동 복구에 실패했습니다. 백업 폴더를 확인해야 합니다.'
         }
     }
-    if ($script:FirewallCreated -and -not $AuditOnly) {
+    if ($script:FirewallCreated -and -not $script:KeyCommitted -and -not $AuditOnly) {
         try {
             Get-NetFirewallRule -Name 'Cookapps-Mate-SSH-In-TCP' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
             Add-Activity '이번 실행에서 만든 방화벽 규칙을 되돌렸습니다.'
@@ -668,6 +738,8 @@ try {
     }
 } finally {
     $report.FinishedAtUtc = [DateTime]::UtcNow.ToString('o')
+    if (@($report.LanAddresses).Count -eq 0) { try { $report.LanAddresses = @(Get-PrimaryNetwork) } catch {} }
+    if (-not $report.HostKeyFingerprint) { try { $report.HostKeyFingerprint = Get-KeyFingerprint -SshKeygen (Join-Path $env:WINDIR 'System32\OpenSSH\ssh-keygen.exe') -Path (Join-Path $env:ProgramData 'ssh\ssh_host_ed25519_key.pub') } catch {} }
     $report.Warnings = @($script:Warnings)
     $report.Activity = @($script:Activity)
     $script:LocalReportPath = Join-Path $reportsRoot ('{0}-{1}.json' -f $requestId, (Get-Date -Format 'yyyyMMdd-HHmmss'))
